@@ -31,6 +31,7 @@ library(pzfx)
 source("descarga_datos.R")  # Funciones para filtrar y exportar datos a Excel
 source("graficos.R")        # Funciones que arman los gráficos (barras, boxplot, etc)
 source("estadistica.R")     # Funciones de test estadísticos y supuestos
+source("Tutoriales.R")      # Diseño pestaña de los tutoriales
 
 
 # ============================================================================
@@ -58,6 +59,8 @@ ui <- fluidPage(
     tabPanel("Configuración",
       sidebarLayout(
         sidebarPanel(
+          actionButton("help_btn", "?", class = "btn btn-info",
+                       style = "border-radius:50%; width:32px; height:32px; font-weight:bold; float:right;"),
           shinyDirButton("carpeta", "Seleccionar carpeta", "Elegir la carpeta donde están los CSV"),
           br(), br(),
           verbatimTextOutput("rutaSeleccionada"),
@@ -178,6 +181,8 @@ server <- function(input, output, session){
   
   # ---- Pestaña Configuración: selección de carpeta -------------------------
   
+  tutorial_server(input, output, session)
+  
   # Accesos rápidos (roots) que ofrece el selector de carpetas de Windows.
   volumes <- c(Escritorio = file.path(Sys.getenv("USERPROFILE"), "Desktop"),
                Usuario = Sys.getenv("USERPROFILE"))
@@ -186,8 +191,10 @@ server <- function(input, output, session){
   
   # Ruta completa de la carpeta elegida (NULL hasta que el usuario elija una).
   ruta <- reactive({
-    if (is.null(input$carpeta)) return(NULL)
-    parseDirPath(volumes, input$carpeta)
+    req(input$carpeta)
+    dir_path <- parseDirPath(volumes, input$carpeta)
+    if(length(dir_path) == 0 || dir_path == "") return(NULL)
+    enc2utf8(dir_path)  #Detección de caractere especiales
   })
   
   # Estados reactivos centrales de la app: se resetean cada vez que cambia
@@ -207,10 +214,10 @@ server <- function(input, output, session){
     descarga_habilitada(FALSE)
     req(ruta())
     req(dir.exists(ruta()))
-    setwd(ruta())
     
-    grupos_detectados <- nombres()
+    grupos_detectados <- nombres(ruta())
     grupos(grupos_detectados)
+    
     if (length(grupos_detectados) == 0) {
       showNotification(
         "Esta carpeta no contiene archivos con el formato esperado (*.tif-results-azul.csv). Verifique que sea la carpeta correcta.",
@@ -220,6 +227,7 @@ server <- function(input, output, session){
     }
     
     archivos_txt <- list.files(ruta(), pattern = "\\.txt$", full.names = FALSE)
+    archivos_txt <- enc2utf8(archivos_txt)
     updateSelectInput(session, "archivo_areas_sel",
                       choices  = archivos_txt,
                       selected = if (length(archivos_txt) > 0) archivos_txt[1] else NULL)
@@ -383,7 +391,6 @@ server <- function(input, output, session){
     req(ruta())
     req(input$control)
     patrones <- c(input$control,input$experimentales)
-    setwd(ruta())
     
     # Procesa los CSV según lo que el usuario haya tildado en "archivos a
     # generar": resumen por muestra y/o datos punto a punto.
@@ -394,12 +401,14 @@ server <- function(input, output, session){
         
         res <- if (input$modo_area == "manual") {
           procesar_CSVs(
-            patrones = patrones,
-            area_ROI = input$areaROI,
-            filtrar  = input$filtrar
+            ruta_carpeta = ruta(),
+            patrones     = patrones,
+            area_ROI     = input$areaROI,
+            filtrar      = input$filtrar
           )
         } else {
           procesar_CSVs(
+            ruta_carpeta  = ruta(),
             patrones      = patrones,
             archivo_areas = file.path(ruta(), input$archivo_areas_sel),
             filtrar       = input$filtrar
@@ -414,7 +423,7 @@ server <- function(input, output, session){
       if("puntos" %in% input$archivos){
         incProgress(0.6, detail = "Procesando datos punto a punto...")
         
-        res_puntos <- procesar_puntos(patrones = patrones, filtrar = input$filtrar)
+        res_puntos <- procesar_puntos(ruta_carpeta = ruta(), patrones = patrones, filtrar = input$filtrar)
         wb_puntos(res_puntos)
       }
       

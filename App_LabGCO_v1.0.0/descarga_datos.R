@@ -25,13 +25,14 @@ library(pzfx)      # Exportación a formato GraphPad Prism (.pzfx)
 
 escapar_regex <- function(x) gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", x)
 
-nombres <- function() {
+nombres <- function(ruta_carpeta = ".") {
   extraer_nombre <- function(x) {
     sub("^(.*)\\s[^\\s]+\\.tif-results-azul\\.csv$", "\\1", x)
   }
-  files   <- list.files(pattern = "tif-results-azul")
-  nombres <- unique(sapply(files, extraer_nombre, USE.NAMES = FALSE))
-  return(nombres)
+  files   <- list.files(path = ruta_carpeta, pattern = "tif-results-azul", full.names = FALSE)
+  files <- enc2utf8(files)
+  nombres_extraidos <- unique(sapply(files, extraer_nombre, USE.NAMES = FALSE))
+  return(enc2utf8(nombres_extraidos))
 }
 
 # Convierte los valores numéricos de una tabla a texto con coma decimal,
@@ -66,7 +67,7 @@ formatear_numeros_es <- function(df){
 #                partículas cuya Area esté fuera del rango (0.0001, 1) — un
 #                filtro de ruido/artefactos típico de las mediciones de Fiji.
 
-procesar_CSVs <- function(patrones, archivo_areas = NULL, area_ROI = NULL, filtrar = TRUE) {
+procesar_CSVs <- function(patrones, ruta_carpeta = ".", archivo_areas = NULL, area_ROI = NULL, filtrar = TRUE) {
   
   if (is.null(archivo_areas) && is.null(area_ROI))
     stop("Debes proveer 'archivo_areas' (txt por imagen) o 'area_ROI' (area global en px2).")
@@ -82,9 +83,27 @@ procesar_CSVs <- function(patrones, archivo_areas = NULL, area_ROI = NULL, filtr
   
   # Leer tabla de areas por imagen (modo nuevo)
   if (!is.null(archivo_areas)) {
-    tabla_areas <- read.table(archivo_areas, header = TRUE, sep = "\t",
-                              stringsAsFactors = FALSE)
+    nombre_txt <- basename(archivo_areas)
+    ruta_txt <- file.path(ruta_carpeta, nombre_txt)
+    tabla_areas <- tryCatch(
+        read.table(ruta_txt, header = TRUE, sep = "\t",
+                   stringsAsFactors = FALSE, encoding = "UTF-8", fileEncoding = "UTF-8"),
+        warning = function(w){
+          read.table(ruta_txt, header = TRUE, sep = "\t",
+                   stringsAsFactors = FALSE, encoding = "latin1", fileEncoding = "latin1")
+        },
+        error = function(e){
+          read.table(ruta_txt, header = TRUE, sep = "\t",
+                   stringsAsFactors = FALSE)
+        }
+      )
     stopifnot("Archivo" %in% names(tabla_areas), "Area_cm2" %in% names(tabla_areas))
+    
+    normalizar_texto <- function(txt){
+      txt <- enc2utf8(as.character(txt))
+      txt <- trimws(txt)
+    }
+    tabla_areas$Archivo_limpio <- normalizar_texto(tabla_areas$Archivo)
     area_ROI_cm2 <- NULL   # se determina por imagen
   } else {
     tabla_areas  <- NULL
@@ -114,7 +133,7 @@ procesar_CSVs <- function(patrones, archivo_areas = NULL, area_ROI = NULL, filtr
     
     for (archivo in archivos) {
       
-      datos_completos <- read.csv(archivo, sep = ",")
+      datos_completos <- read.csv(archivo, sep = ",", encoding = "UTF-8", fileEncoding = "UTF-8")
       
       if (filtrar) {
         datos <- datos_completos[
@@ -132,13 +151,31 @@ procesar_CSVs <- function(patrones, archivo_areas = NULL, area_ROI = NULL, filtr
         # Area individual desde el txt.
         # El CSV se llama "Nombre.tif-results-azul.csv", el txt tiene "Nombre.tif"
         nombre_tif <- sub("-results-azul\\.csv$", "", basename(archivo))
-        fila_area  <- tabla_areas[tabla_areas$Archivo == nombre_tif, ]
-        if (nrow(fila_area) == 0) {
-          warning(paste("No se encontro el area para:", nombre_tif,
-                        "- se omite este archivo."))
+        nombre_tif_limpio <- normalizar_texto(nombre_tif)
+        
+        idx <- which(tabla_areas$Archivo_limpio == nombre_tif_limpio)
+        
+        if(length(idx) == 0){
+          tif_csv <- sub("\\.tif$", "", nombre_tif_limpio, ignore.case = TRUE)
+          tif_txt <- sub("\\.tif$", "", tabla_areas$Archivo_limpio, ignore.case = TRUE)
+          idx <- which(tif_txt == tif_csv)
+        }
+        
+        if(length(idx) == 0){
+          esencia_csv <- gsub("[^a-zA-Z0-9]", "", nombre_tif_limpio)
+          esencia_txt <- gsub("[^a-zA-Z0-9]", "", tabla_areas$Archivo_limpio)
+          idx <- which(esencia_txt == esencia_csv)
+        }
+        
+        if(length(idx) == 0){
+          warning(paste("❌ NO ENCONTRADO: No se encontró área en TXT para el archivo:", nombre_tif))
           next
         }
-        area_imagen_cm2 <- fila_area$Area_cm2[1]
+        
+        idx_coincidencia <- idx[1]
+        area_imagen_cm2  <- tabla_areas$Area_cm2[idx_coincidencia]
+        nombre_txt_orig  <- tabla_areas$Archivo[idx_coincidencia]
+        
       } else {
         # Area global para todas las imagenes
         area_imagen_cm2 <- area_ROI_cm2
@@ -189,32 +226,45 @@ procesar_CSVs <- function(patrones, archivo_areas = NULL, area_ROI = NULL, filtr
   }
   
   
-  # Procesar cada grupo. Escapamos el regex de cada patron al buscar los archivos.
+  # Procesar cada grupo según su nombre.
+  
+  construir_regex_estricta <- function(patron){
+    patron_esc <- escapar_regex(patron)
+    paste0("^", patron_esc, "(?:\\s*\\d+)?(?:\\.tif)?-results-azul\\.csv$")
+  }
+  
   grupos <- vector("list", length(patrones))
   names(grupos) <- patrones
   
-  # Primero el control (grupo 1) para obtener la referencia de relativizacion
-  patron_esc1 <- escapar_regex(patrones[1])
-  archivos_control <- list.files(pattern = paste0(patron_esc1, ".*tif-results-azul.csv"),
-                                 full.names = TRUE, ignore.case = TRUE)
+  todos_los_csvs <- list.files(path = ruta_carpeta, pattern = "\\.csv$", full.names = TRUE)
+  
+  patron_control <- patrones[1]
+  regex_control  <- construir_regex_estricta(patron_control)
+  
+  archivos_control <- todos_los_csvs[grepl(regex_control, basename(todos_los_csvs), ignore.case = TRUE, perl = TRUE)]
+  archivos_control <- enc2utf8(archivos_control)
+  
   grupos[[1]] <- procesar_grupo(archivos_control, filtrar = filtrar)
   
-  prom_DefTotal_ref <- if (nrow(grupos[[1]]) > 0) {
+  prom_DefTotal_ref <- if(!is.null(grupos[[1]]) && nrow(grupos[[1]]) > 0){
     mean(grupos[[1]]$DefTotal, na.rm = TRUE)
   } else NULL
   
-  # Resto de los grupos relativizados al control
-  if (length(patrones) > 1) {
-    for (i in 2:length(patrones)) {
-      patron_esc <- escapar_regex(patrones[i])
-      archivos <- list.files(pattern = paste0(patron_esc, ".*tif-results-azul.csv"),
-                             full.names = TRUE, ignore.case = TRUE)
-      grupos[[i]] <- procesar_grupo(archivos,
-                                    prom_DefTotal_ref = prom_DefTotal_ref,
+  if(length(patrones) > 1){
+    for(i in 2:length(patrones)){
+      patron_i <- patrones[i]
+      regex_i  <- construir_regex_estricta(patron_i)
+      
+      archivos <- todos_los_csvs[grepl(regex_i, basename(todos_los_csvs), ignore.case = TRUE, perl = TRUE)]
+      archivos <- enc2utf8(archivos)
+      
+      grupos[[i]] <- procesar_grupo(archivos, 
+                                    prom_DefTotal_ref = prom_DefTotal_ref, 
                                     filtrar = filtrar)
     }
   }
   
+
   list(
     grupos = grupos,
     patrones = patrones,
@@ -357,16 +407,21 @@ construir_tabla_comparativa_promedios <- function(tablas_filtradas) {
 # como en procesar_CSVs). Agrega columnas derivadas (CV, intensidad
 # calibrada, área en mm2, IntDen calibrado) y una columna "replica" que
 # identifica de qué archivo/imagen viene cada partícula.
-juntar.CSVs <- function(patron, factor_a_mm2, filtrar = FALSE) {
+juntar.CSVs <- function(patron, factor_a_mm2, filtrar = FALSE, ruta_carpeta = ".") {
   
   patron_esc <- escapar_regex(patron)
-  archivos <- list.files(pattern = paste0(patron_esc, ".*results-azul\\.csv"),
+  archivos <- list.files(path = ruta_carpeta, pattern = paste0(patron_esc, ".*results-azul\\.csv"),
                          full.names = TRUE, ignore.case = TRUE)
+  
+  archivos <- enc2utf8(archivos)
+  if (length(archivos) == 0){
+    return(data.frame())
+  }
   
   csv.completo <- data.frame()
   
-  for (i in 1:length(archivos)) {
-    csv          <- read.csv(archivos[i])
+  for (i in seq_along(archivos)) {
+    csv          <- read.csv(archivos[i], encoding = "UTF-8", fileEncoding = "UTF-8")
     csv$replica  <- i
     csv$patron   <- patron
     csv$CV       <- csv$StdDev / csv$Mean
@@ -381,8 +436,12 @@ juntar.CSVs <- function(patron, factor_a_mm2, filtrar = FALSE) {
     csv.completo <- dplyr::bind_rows(csv.completo, csv)
   }
   
-  if (filtrar) {
+  if (filtrar && nrow(csv.completo) > 0) {
     csv.completo <- dplyr::filter(csv.completo, Area > 50 & Area < 4000)
+  }
+  
+  if (nrow(csv.completo) == 0){
+    return(csv.completo)
   }
   
   # Reordenar columnas
@@ -436,20 +495,17 @@ juntar.CSVs <- function(patron, factor_a_mm2, filtrar = FALSE) {
 # hoja "Comparacion" con las variables elegidas. Devuelve tanto el
 # Workbook como la lista de datos por patrón (esta última se reutiliza
 # después para armar el Excel filtrado y para copiar al portapapeles).
-procesar_puntos <- function(patrones, filtrar = FALSE){
+procesar_puntos <- function(patrones, ruta_carpeta = ".", filtrar = FALSE){
   
   factor_a_mm2 <- 0.000448
-  
   wb <- createWorkbook()
-  
   lista_datos <- list()
   
   for (patron in patrones) {
-    
     message("Procesando patrón: ", patron)
     
     datos <- tryCatch(
-      juntar.CSVs(patron, factor_a_mm2, filtrar),
+      juntar.CSVs(patron, factor_a_mm2, filtrar, ruta_carpeta = ruta_carpeta),
       error = function(e) {
         warning("Error en patrón '", patron, "': ", e$message)
         NULL
@@ -472,6 +528,7 @@ procesar_puntos <- function(patrones, filtrar = FALSE){
   
   for (patron in names(lista_datos)) {
     # Los nombres de hoja no pueden superar 31 caracteres
+    nombre_hoja <- gsub("[\\[\\]\\:*?/\\\\]", "_", patron)
     nombre_hoja <- substr(patron, 1, 31)
     addWorksheet(wb, nombre_hoja)
     writeData(wb, nombre_hoja, lista_datos[[patron]])
