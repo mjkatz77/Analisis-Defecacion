@@ -14,7 +14,8 @@ paquetes <- c(
   "shinyjs",
   "shinyWidgets",
   "zip",
-  "pzfx"
+  "pzfx",
+  "jsonlite"
 )
 
 # Instalar únicamente los que faltan

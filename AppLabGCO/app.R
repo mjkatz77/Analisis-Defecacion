@@ -19,6 +19,7 @@
 # la interfaz (ui) y la orquestación reactiva (server).
 # ============================================================================
 
+APP_VERSION <- "1.0.3"
 
 library(shiny)
 library(shinyFiles)
@@ -57,11 +58,16 @@ ui <- fluidPage(
     # Selección de carpeta, grupo control/experimentales, área ROI y
     # disparo del procesamiento de los CSV.
     tabPanel("Configuración",
+      div(style = "text-align: right; color: #888; font-size: 12px; margin: 0 4px 6px 0;",
+         paste0("v", APP_VERSION)),
       sidebarLayout(
         sidebarPanel(
           actionButton("help_btn", "?", class = "btn btn-info",
                        style = "border-radius:50%; width:32px; height:32px; font-weight:bold; float:right;"),
           shinyDirButton("carpeta", "Seleccionar carpeta", "Elegir la carpeta donde están los CSV"),
+          actionButton("abrir_fav", "\u2605 Favoritas",
+                       class = "btn-xs btn-default",
+                       style = "display: block; margin-top: 4px;"),
           br(), br(),
           verbatimTextOutput("rutaSeleccionada"),
           hr(),
@@ -174,6 +180,40 @@ ui <- fluidPage(
   )
 )
 
+# Guardar carpetas como favoritas
+MAX_FAV <- 5     # Cantidad max de carpetas favoritas
+CARGAR_FAV_AL_INICIAR <- FALSE
+config_dir  <- tools::R_user_dir("AppLabGCO", which = "config")
+config_file <- file.path(config_dir, "config.json")
+
+leer_config <- function() {
+  if (file.exists(config_file)) {
+    tryCatch(jsonlite::fromJSON(config_file), error = function(e) list())
+  } else list()
+}
+
+guardar_config <- function(cfg) {
+  dir.create(config_dir, recursive = TRUE, showWarnings = FALSE)
+  jsonlite::write_json(cfg, config_file, auto_unbox = TRUE, pretty = TRUE)
+}
+
+home <- if (.Platform$OS.type == "windows") Sys.getenv("USERPROFILE") else Sys.getenv("HOME")
+
+# El Escritorio puede estar en OneDrive según la PC: se prueba cada opción
+candidatos_escritorio <- c(file.path(home, "Desktop"),
+                           file.path(home, "OneDrive", "Desktop"),
+                           file.path(home, "OneDrive", "Escritorio"),
+                           file.path(home, "Escritorio"))
+escritorio <- candidatos_escritorio[dir.exists(candidatos_escritorio)][1]
+
+volumes_base <- c(Usuario = home)
+if (!is.na(escritorio)) volumes_base <- c(volumes_base, Escritorio = escritorio)
+
+etiquetas_fav <- function(f) {
+  if (!length(f)) return(character(0))
+  make.unique(paste0("\u2605 ", basename(f)))
+}
+
 # ============================================================================
 # SERVER
 # ============================================================================
@@ -183,19 +223,130 @@ server <- function(input, output, session){
   
   tutorial_server(input, output, session)
   
-  # Accesos rápidos (roots) que ofrece el selector de carpetas de Windows.
-  volumes <- c(Escritorio = file.path(Sys.getenv("USERPROFILE"), "Desktop"),
-               Usuario = Sys.getenv("USERPROFILE"))
+  # Carpeta guardada como favoritas para un acceso rápido
   
-  shinyDirChoose(input,"carpeta",roots = volumes,session = session, allowDirCreate = FALSE)
+  # Favoritas al iniciar la app
+  favoritas_ini <- as.character(leer_config()$favoritas)
+  f_ini         <- favoritas_ini[dir.exists(favoritas_ini)]
+  # Favoritas durante la sesión
+  favoritas <- reactiveVal(favoritas_ini)
   
-  # Ruta completa de la carpeta elegida (NULL hasta que el usuario elija una).
-  ruta <- reactive({
-    req(input$carpeta)
-    dir_path <- parseDirPath(volumes, input$carpeta)
-    if(length(dir_path) == 0 || dir_path == "") return(NULL)
-    enc2utf8(dir_path)  #Detección de caractere especiales
+  roots <- c(volumes_base, setNames(f_ini, etiquetas_fav(f_ini)))
+  
+  default_ini <- if (length(f_ini)) {
+    etiquetas_fav(f_ini)[1]
+  } else if ("Escritorio" %in% names(volumes_base)) {
+    "Escritorio"
+  } else {
+    "Usuario"
+  }
+  
+  shinyDirChoose(input,"carpeta",roots = roots, defaultRoot = default_ini, 
+                 session = session, allowDirCreate = FALSE)
+  
+  ruta_sel <- reactiveVal(NULL)
+  ruta     <- reactive(ruta_sel())
+  
+  # I- Cuando el usuario elige con el selector
+  observeEvent(input$carpeta, {
+    if(is.integer(input$carpeta)) return ()
+    p <- parseDirPath(roots, input$carpeta)
+    if(length(p) > 0 && nzchar(p)) ruta_sel(enc2utf8(p))
   })
+  
+  # II- Carpeta favorita guardada
+  actualizar_favoritas <- function(f) {
+    cfg <- leer_config()
+    cfg$favoritas <- f
+    guardar_config(cfg)
+    favoritas(f)
+  }
+  
+  observeEvent(input$guardar_fav, {
+    if (is.null(ruta())) {
+      showNotification("Primero elegí una carpeta.", type = "warning")
+      return()
+    }
+    f <- favoritas()
+    if (ruta() %in% f) {
+      showNotification("Esa carpeta ya está en favoritas.", type = "warning")
+      return()
+    }
+    if (length(f) >= MAX_FAV) {
+      showNotification(paste0("Máximo ", MAX_FAV, " favoritas. Quitá alguna primero."),
+                       type = "warning")
+      return()
+    }
+    actualizar_favoritas(c(f, ruta()))
+    showNotification("Carpeta agregada a favoritas.", type = "message")
+  })
+  
+  observeEvent(input$abrir_fav, {
+    showModal(modalDialog(
+      title     = "\u2605 Carpetas favoritas",
+      uiOutput("ui_modal_fav"),
+      footer    = modalButton("Cerrar"),
+      easyClose = TRUE,
+      size      = "m"
+    ))
+  })
+  
+  # Contenido de la ventana: se redibuja solo cuando cambian las favoritas
+  # o la carpeta seleccionada
+  output$ui_modal_fav <- renderUI({
+    f <- favoritas()
+    r <- ruta()
+    ya_es_fav <- !is.null(r) && r %in% f
+    
+    tagList(
+      h5(strong("Carpeta seleccionada")),
+      if (is.null(r)) {
+        p(tags$em("Todavía no elegiste ninguna carpeta."))
+      } else {
+        tagList(
+          div(style = "word-break: break-all;", tags$code(r)),
+          div(style = "margin-top: 8px;",
+              if (ya_es_fav) {
+                tags$small("Esta carpeta ya está en favoritas.")
+              } else {
+                actionButton("guardar_fav", "\u2605 Guardar como favorita",
+                             class = "btn-primary btn-sm")
+              })
+        )
+      },
+      
+      hr(),
+      h5(strong(paste0("Favoritas guardadas (", length(f), "/", MAX_FAV, ")"))),
+      if (length(f) == 0) {
+        p(tags$em("Todavía no guardaste ninguna."))
+      } else {
+        tagList(lapply(seq_along(f), function(i) {
+          div(
+            style = "display: flex; align-items: center; gap: 6px; margin-bottom: 8px;",
+            div(style = "flex: 1; min-width: 0; word-break: break-all;",
+                strong(basename(f[i])), br(),
+                tags$small(style = "color: #888;", f[i])),
+            tags$button(
+              type = "button", class = "btn btn-danger btn-xs",
+              onclick = sprintf("Shiny.setInputValue('borrar_fav_idx', %d, {priority: 'event'})", i),
+              "Quitar")
+          )
+        }))
+      },
+      tags$small(style = "color: #888;",
+                 "Las favoritas aparecen en el selector de carpetas al abrir la app.")
+    )
+  })
+  
+  # Quitar una favorita
+  observeEvent(input$borrar_fav_idx, {
+    f <- favoritas()
+    i <- input$borrar_fav_idx
+    req(i >= 1, i <= length(f))
+    actualizar_favoritas(f[-i])
+    showNotification("Favorita eliminada.", type = "message")
+  })
+  
   
   # Estados reactivos centrales de la app: se resetean cada vez que cambia
   # algo que invalida los resultados ya calculados (carpeta, filtros, grupos).
@@ -215,22 +366,34 @@ server <- function(input, output, session){
     req(ruta())
     req(dir.exists(ruta()))
     
-    grupos_detectados <- nombres(ruta())
-    grupos(grupos_detectados)
-    
-    if (length(grupos_detectados) == 0) {
-      showNotification(
-        "Esta carpeta no contiene archivos con el formato esperado (*.tif-results-azul.csv). Verifique que sea la carpeta correcta.",
-        type = "warning",
-        duration = NULL
-      )
-    }
-    
     archivos_txt <- list.files(ruta(), pattern = "\\.txt$", full.names = FALSE)
     archivos_txt <- enc2utf8(archivos_txt)
     updateSelectInput(session, "archivo_areas_sel",
                       choices  = archivos_txt,
                       selected = if (length(archivos_txt) > 0) archivos_txt[1] else NULL)
+  
+  grupos_detectados <- tryCatch(
+    nombres(ruta()),
+    error = function(e) {
+      showNotification(paste("Error al leer la carpeta:", conditionMessage(e)),
+                       type = "error", duration = NULL, id = "err_carpeta")
+      NULL
+    }
+  )
+  
+  if (length(grupos_detectados) == 0) {
+    grupos(NULL)
+    showNotification(
+      paste0("Esta carpeta no contiene archivos *.tif-results-azul.csv, por lo que no se puede analizar. ",
+             "Podés guardarla como favorita; para analizar, elegí otra carpeta."),
+      type = "warning", duration = 10, id = "aviso_sin_csv"
+    )
+    return()
+  }
+  
+  removeNotification("aviso_sin_csv")
+  removeNotification("err_carpeta")
+  grupos(grupos_detectados)
   })
   
   # Selector de grupo control: se arma dinámicamente con los grupos
@@ -662,7 +825,8 @@ server <- function(input, output, session){
       construir_tabla_comparacion_puntos(
         lista_datos = filtrar_puntos(wb_puntos()$grupos, input$descarga_muestras, input$descarga_parametros),
         patrones    = input$descarga_muestras,
-        vars_comparar = input$descarga_parametros
+        vars_comparar = input$descarga_parametros,
+        encabezado_unico = TRUE
       ),
       error = function(e) {
         showNotification(paste("No se pudo generar la tabla:", e$message), type = "error", duration = 10)
@@ -685,6 +849,7 @@ server <- function(input, output, session){
       }
     )
     req(tabla)
+    tabla <- unificar_encabezado(tabla)
     paste(capture.output(write.table(tabla, sep = "\t", col.names = FALSE, row.names = FALSE, quote = FALSE)), collapse = "\n")
   })
   

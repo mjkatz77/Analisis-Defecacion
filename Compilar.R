@@ -12,8 +12,11 @@ library(shinyelectron)
 
 # Ejecutar el empaquetado
 export(
-  appdir  = "C:/Users/ramig/Desktop/Proyecto Final/Optimizacion Software/InterfazGrafica/App_LabGCO_v1.0.0",
+  appdir  = "C:/Users/ramig/Desktop/Proyecto Final/Optimizacion Software/InterfazGrafica/AppLabGCO",
   destdir = "C:/Users/ramig/Desktop/Proyecto Final/Optimizacion Software/InterfazGrafica/AccesoDirecto_App",
+  app_name = "AppLabGCO",
   runtime_strategy = "bundled",
   overwrite = TRUE
 )
+
+

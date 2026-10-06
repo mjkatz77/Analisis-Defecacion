@@ -27,7 +27,6 @@ variables_graficos <- list(
     niveles = TRUE),
   
   "Intensidad media calibrada" = list(
-    resumen = NA,           
     puntos  = "Mean_calibrado",
     niveles = TRUE
   ),

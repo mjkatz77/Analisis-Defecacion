@@ -31,7 +31,7 @@ nombres <- function(ruta_carpeta = ".") {
   }
   files   <- list.files(path = ruta_carpeta, pattern = "tif-results-azul", full.names = FALSE)
   files <- enc2utf8(files)
-  nombres_extraidos <- unique(sapply(files, extraer_nombre, USE.NAMES = FALSE))
+  nombres_extraidos <- unique(extraer_nombre(files))
   return(enc2utf8(nombres_extraidos))
 }
 
@@ -616,7 +616,7 @@ agregar_hoja_comparacion_puntos <- function(wb, lista_datos, patrones, vars_comp
 # ---- Función copiar al portapapeles ----
 # Mantiene el formato de la hoja "comparación" de los archivos Excel. Se mantiene como función
 # aparte para no alterar el formato de la hoja de Excel.
-construir_tabla_comparacion_puntos <- function(lista_datos, patrones, vars_comparar) {
+construir_tabla_comparacion_puntos <- function(lista_datos, patrones, vars_comparar, encabezado_unico = FALSE) {
   vars_comparar <- intersect(vars_comparar,
                              unique(unlist(lapply(lista_datos, colnames))))
   if (length(vars_comparar) == 0) return(NULL)
@@ -634,19 +634,45 @@ construir_tabla_comparacion_puntos <- function(lista_datos, patrones, vars_compa
   datos <- do.call(cbind, bloques)
   datos <- formatear_numeros_es(datos)
   
+  fila_patron <- rep(patrones, length(vars_comparar))
+  colnames(datos) <- as.character(seq_len(ncol(datos)))  # nombres temporales, no importan
+  
+  # Una sola fila de encabezado: "Patrón (Variable)"
+  if (encabezado_unico) {
+    fila_variable_cada_col <- rep(vars_comparar, each = length(patrones))
+    encabezado <- paste0(fila_patron, " (", fila_variable_cada_col, ")")
+    return(rbind(
+      setNames(as.list(encabezado), colnames(datos)),
+      datos
+    ))
+  }
+  
+  # Dos filas de encabezado + los datos, todo como texto/tabla plana
   fila_variable <- unlist(lapply(seq_along(vars_comparar), function(i) {
     c(vars_comparar[i], rep("", length(patrones) - 1))
   }))
-  fila_patron <- rep(patrones, length(vars_comparar))
   
-  colnames(datos) <- as.character(seq_len(ncol(datos)))  # nombres temporales, no importan
-  
-  # Dos filas de encabezado + los datos, todo como texto/tabla plana
   rbind(
     setNames(as.list(fila_variable), colnames(datos)),
     setNames(as.list(fila_patron),   colnames(datos)),
     datos
   )
+}
+
+unificar_encabezado <- function(tabla){
+  tabla <- as.data.frame(tabla, stringsAsFactors = FALSE)
+  tabla[] <- lapply(tabla, as.character)
+  fila_var <- as.character(unlist(tabla[1, ], use.names = FALSE))
+  fila_pat <- as.character(unlist(tabla[2, ], use.names = FALSE))
+  fila_var[is.na(fila_var)] <- ""
+  fila_pat[is.na(fila_pat)] <- ""
+  # La variable solo está escrita en la primera columna de cada bloque
+  for (i in seq_along(fila_var)) {
+    if (i > 1 && !nzchar(fila_var[i])) fila_var[i] <- fila_var[i - 1]
+  }
+  encabezado <- ifelse(nzchar(fila_pat), paste0(fila_pat, " (", fila_var, ")"), "")
+  rbind(setNames(as.list(encabezado), colnames(tabla)),
+        tabla[-(1:2), , drop = FALSE])
 }
 
 # Agrega al Workbook, una hoja por patrón con su tabla punto a punto completa.
